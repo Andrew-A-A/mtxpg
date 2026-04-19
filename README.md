@@ -266,5 +266,5 @@ Returns the tenant ID extracted from request headers / query / user, or `null`.
 | `cds.fiori.lean_draft` error on startup | Missing config | Add `"fiori": { "lean_draft": true }` to `cds` config |
 
 ## TODO:
-[] Test the behavior of adapter in case of using `.env` file
+[] Test the behavior of adapter in case of using `.env` file <br>
 [] Test project deployment on BTP while using `mtxpg`
