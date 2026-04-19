@@ -70,14 +70,16 @@ class TenantService extends cds.ApplicationService {
   async _info(req) {
     const { SELECT } = cds.ql;
     const { tenantId } = req.data;
-    const tx = req.tx || (await cds.connect.to('db')).tx(req);
+    // Use the DB-level tx (req.tx is the service tx, which would dispatch
+    // db.Tenants back through TenantService and fail to resolve).
+    const tx = (await cds.connect.to('db')).tx(req);
     const tenant = await tx.run(SELECT.one.from(TENANTS).where({ tenantId }));
     return tenant ? JSON.stringify(tenant) : null;
   }
 
   async _list(req) {
     const { SELECT } = cds.ql;
-    const tx = req.tx || (await cds.connect.to('db')).tx(req);
+    const tx = (await cds.connect.to('db')).tx(req);
     const rows = await tx.run(SELECT.from(TENANTS).where({ status: 'ACTIVE' }));
     return rows.map((r) => r.tenantId);
   }

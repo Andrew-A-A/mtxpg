@@ -265,6 +265,88 @@ Returns the tenant ID extracted from request headers / query / user, or `null`.
 | `npm run deploy` does nothing | `scripts/deploy.js` `require()`'d `cds-deploy.js`, which short-circuits its CLI block via `if (!module.parent)` | Spawn `cds-deploy` as a child process (already in this repo's wrapper) |
 | `cds.fiori.lean_draft` error on startup | Missing config | Add `"fiori": { "lean_draft": true }` to `cds` config |
 
+---
+
+## Testing
+
+The package ships with a Jest suite covering both unit-level helpers and end-to-end multitenancy behaviour against a real PostgreSQL.
+
+### Layout
+
+```
+mtxpg/test/
+├── unit/                       # pure functions, no DB
+│   ├── sanitize.test.js
+│   └── get-tenant-from-request.test.js
+├── integration/                # boots the host CAP project against real Postgres
+│   └── multitenancy.test.js
+└── helpers/
+    ├── pg.js                   # direct pg client for schema introspection
+    └── tenant-id.js            # generates collision-free `jest_<ts>_<rand>` IDs
+```
+
+### Prerequisites for integration tests
+
+1. **PostgreSQL is running** and reachable. Defaults: `localhost:5432`, db `cds_multitenant`, user/pw `postgres/postgres`. Override with env vars `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`.
+2. **The host project has been deployed** at least once (`npm run deploy` from the parent), so `public.db_Tenants` and the business tables exist as a template.
+3. **The host project is wired** as described in the Setup section (CDS imports + `require('mtxpg')` in `server.js`).
+
+The integration suite calls `cds.test('<host-project-root>')`, which boots the parent CAP app — that's why the host wiring matters even for tests living inside the package.
+
+### Running
+
+From inside `mtxpg/`:
+
+```bash
+npm install              # installs jest, pg, @cap-js/cds-test (devDeps)
+npm run test:unit        # ~1s, no DB required
+npm run test:integration # boots CAP, hits real Postgres
+npm test                 # both, in band
+```
+
+`--runInBand` is enforced because `cds.test()` boots a single shared HTTP server per Jest worker; running test files in parallel would clobber it.
+
+### What's covered
+
+| Layer | Scenario |
+|---|---|
+| Unit | `sanitize` — special chars, lowercasing, falsy-input rejection, SQL-injection-shaped inputs |
+| Unit | `getSchemaName` — deterministic, prefixed, propagates sanitize errors |
+| Unit | `getTenantFromRequest` — header priority chain (`x-tenant-id` > `sap-tenancy` > query > user) |
+| Integration | `createTenant` provisions the schema and a registry row |
+| Integration | Tenant schema contains business tables but **not** `db_Tenants` |
+| Integration | `listTenants` / `getTenantInfo` reflect the new tenant |
+| Integration | `createTenant` rejects missing `tenantId` |
+| Integration | `deleteTenant` drops the schema and removes the registry row |
+| Integration | POST with `x-tenant-id` lands in `tenant_<id>.db_Products`, not `public` |
+| Integration | Tenant A and Tenant B see only their own rows (data isolation) |
+| Integration | DELETE only affects the calling tenant |
+| Integration | Missing `x-tenant-id` → 400 |
+| Integration | Unknown tenant → 404 |
+| Integration | Inactive tenant → 403 |
+| Integration | `db.before('*')` hook skips `target === 'db.Tenants'` so registry queries stay in `public` |
+
+### Cleanup
+
+Every integration test uses a unique `jest_<timestamp>_<rand>` tenant ID. `afterAll` drops the schemas and removes their registry rows. Even if a run is killed mid-flight, the next run uses fresh IDs and the strays can be removed with:
+
+```sql
+DROP SCHEMA IF EXISTS "tenant_jest_..." CASCADE;
+DELETE FROM public.db_Tenants WHERE "tenantId" LIKE 'jest_%';
+```
+
+### CI / pre-publish gate
+
+Wire `npm test` into your CI step. A green run validates:
+- the public API surface still works,
+- the search_path hook is in place,
+- DDL still emits cleanly for the host model,
+- the middleware still rejects bad requests with the documented status codes.
+
+Bump the package version only after `npm test` passes against the supported Postgres version.
+
+---
+
 ## TODO:
 [] Test the behavior of adapter in case of using `.env` file <br>
 [] Test project deployment on BTP while using `mtxpg`

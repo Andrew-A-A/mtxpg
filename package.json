@@ -11,9 +11,19 @@
     "src/adapter/**",
     "index.js"
   ],
+  "scripts": {
+    "test": "jest --runInBand",
+    "test:unit": "jest --runInBand --selectProjects unit",
+    "test:integration": "jest --runInBand --selectProjects integration"
+  },
   "peerDependencies": {
     "@sap/cds": ">=8",
     "@cap-js/postgres": ">=1"
+  },
+  "devDependencies": {
+    "axios": "^1.7.0",
+    "jest": "^29.7.0",
+    "pg": "^8.11.0"
   },
   "cds": {
     "folders": {
@@ -21,5 +31,5 @@
       "db": "./src/db"
     }
   },
-  "keywords": ["sap", "cap", "multitenancy", "postgresql", "mtx"]
+  "keywords": ["sap", "cds", "cap", "multitenancy", "PostgreSQL", "mtx", "mtx-pg"]
 }

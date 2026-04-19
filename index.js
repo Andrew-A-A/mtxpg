@@ -14,6 +14,7 @@ cds.on('connect', (db) => {
     if (!tenantId) return;
 
     const target = req.target && req.target.name;
+    if (!target) return; // lifecycle events (BEGIN/COMMIT/raw SQL) — no search_path needed
     if (target === 'db.Tenants') return; // Tenants table lives in public
 
     const schema = TenantManager.getSchemaName(tenantId);

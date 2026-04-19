@@ -1,6 +1,5 @@
 /* eslint-disable no-console */
 const cds = require('@sap/cds');
-const { SELECT } = cds.ql;
 
 function getTenantFromRequest(req) {
   return (
@@ -13,7 +12,15 @@ function getTenantFromRequest(req) {
 }
 
 // Express middleware: validates the tenant header and propagates it via
-// cds.context so the @cap-js/postgres adapter sees it on every query.
+// cds.context so the search_path hook in `index.js` sees it on every query.
+//
+// Implementation notes:
+//   - The DB query is run against the DB service explicitly (`db.run(...)`),
+//     not via the implicit auto-tx of `SELECT.one.from(...)`. The implicit
+//     route can leak connections when the middleware fires repeatedly under
+//     load, exhausting the pg pool.
+//   - cds.context.tenant is set via the AsyncLocalStorage-aware setter so it
+//     propagates to downstream handlers in the same request scope.
 async function setTenantContext(req, res, next) {
   try {
     const tenantId = getTenantFromRequest(req);
@@ -21,9 +28,9 @@ async function setTenantContext(req, res, next) {
       return res.status(400).json({ error: 'Missing x-tenant-id header' });
     }
 
-    const tenant = await SELECT.one
-      .from('db.Tenants')
-      .where({ tenantId });
+    const { SELECT } = cds.ql;
+    const db = await cds.connect.to('db');
+    const tenant = await db.run(SELECT.one.from('db.Tenants').where({ tenantId }));
 
     if (!tenant) return res.status(404).json({ error: `Tenant '${tenantId}' not found` });
     if (tenant.status !== 'ACTIVE') return res.status(403).json({ error: `Tenant '${tenantId}' is not active` });
