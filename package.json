@@ -1,0 +1,25 @@
+{
+  "name": "mtxpg",
+  "version": "1.0.5",
+  "description": "Schema-per-tenant multitenancy for SAP CAP on PostgreSQL",
+  "main": "index.js",
+  "files": [
+    "src/srv/**",
+    "src/db/**",
+    "src/middleware/**",
+    "src/utils/**",
+    "src/adapter/**",
+    "index.js"
+  ],
+  "peerDependencies": {
+    "@sap/cds": ">=8",
+    "@cap-js/postgres": ">=1"
+  },
+  "cds": {
+    "folders": {
+      "srv": "./src/srv",
+      "db": "./src/db"
+    }
+  },
+  "keywords": ["sap", "cap", "multitenancy", "postgresql", "mtx"]
+}
