@@ -264,3 +264,7 @@ Returns the tenant ID extracted from request headers / query / user, or `null`.
 | Views fail to deploy in tenant schemas | View bodies referenced public tables | Same fix — `search_path` must be set before `CREATE VIEW` |
 | `npm run deploy` does nothing | `scripts/deploy.js` `require()`'d `cds-deploy.js`, which short-circuits its CLI block via `if (!module.parent)` | Spawn `cds-deploy` as a child process (already in this repo's wrapper) |
 | `cds.fiori.lean_draft` error on startup | Missing config | Add `"fiori": { "lean_draft": true }` to `cds` config |
+
+## TODO:
+[] Test the behavior of adapter in case of using `.env` file
+[] Test project deployment on BTP while using `mtxpg`
