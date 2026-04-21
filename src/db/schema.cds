@@ -7,6 +7,4 @@ entity Tenants : cuid, managed {
   name        : String(100) not null;
   status      : String(20) default 'ACTIVE';
   config      : LargeString; // JSON configuration
-  createdAt   : Timestamp;
-  updatedAt   : Timestamp;
 }
