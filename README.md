@@ -63,22 +63,19 @@ npm install file:./mtxpg   # or however you vendor mtxpg
       "db": {
         "kind": "postgres",
         "credentials": {
-          "host":     "${DB_HOST}",
-          "port":     "${DB_PORT}",
-          "database": "${DB_NAME}",
-          "user":     "${DB_USER}",
-          "password": "${DB_PASSWORD}",
+          "host":     "DB_HOST",
+          "port":     "DB_PORT",
+          "database": "DB_NAME",
+          "user":     "DB_USER",
+          "password": "DB_PASSWORD",
           "ssl":      false
         }
       }
     },
-    "fiori":    { "lean_draft": true },     // required by @cap-js/postgres
     "features": { "serve_on_root": true }
   }
 }
 ```
-
-`cds.fiori.lean_draft: true` is required — `@cap-js/postgres` refuses to start without it.
 
 ### 3. Pull the tenant model into your project
 
