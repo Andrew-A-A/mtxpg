@@ -2,7 +2,9 @@
 
 Schema-per-tenant multitenancy for SAP CAP on PostgreSQL — the PostgreSQL counterpart to `@sap/cds-mtxs` (which targets SAP HANA).
 
-Each tenant gets its own PostgreSQL schema (`tenant_<id>`). The CDS model is deployed identically into every tenant schema, while a single shared `db_Tenants` table in `public` tracks the tenant registry. At request time, the package sets `search_path` on the active database transaction so all CAP queries transparently hit the caller's tenant schema.
+Each tenant gets its own PostgreSQL schema (`tenant_<slug>_<hash>`). The CDS model is deployed identically into every tenant schema, while a single shared `db_Tenants` table in `public` tracks the tenant registry. At request time, the package sets `search_path` on the active database transaction so all CAP queries transparently hit the caller's tenant schema.
+
+> **Read this before wiring it up:** `TenantService` is a control-plane API and ships behind the `mtxpg-admin` role, and `setTenantContext` performs tenant *resolution*, not authorization. See [Security model](#security-model).
 
 ---
 
@@ -21,14 +23,17 @@ Each tenant gets its own PostgreSQL schema (`tenant_<id>`). The CDS model is dep
                   ▼
        db.before('*') hook (registered by mtxpg)
        - reads cds.context.tenant
-       - runs SET LOCAL search_path TO "tenant_acme", public
+       - verifies the tenant schema exists (cached per process)
+       - runs SET LOCAL search_path TO "tenant_acme_1f3d9c"
+         (registry targets instead get search_path TO public)
                   ▼
        @cap-js/postgres executes the query
-       - tables resolve to tenant_acme.db_Products etc.
-       - db_Tenants resolves through to public
+       - tables resolve to tenant_acme_1f3d9c.db_Products etc.
 ```
 
-Provisioning (`createTenant` action) runs `CREATE SCHEMA "tenant_<id>"` followed by the full CDS-generated DDL, all on the same request transaction so it's atomic.
+`public` is deliberately **not** on the tenant `search_path`. PostgreSQL accepts a non-existent schema in `search_path` without error and simply skips it, so a trailing `public` would turn a missing tenant schema into a silent read/write of the shared template tables. Without it, a tenant whose schema is missing fails closed with `Tenant '<id>' is not provisioned`.
+
+Provisioning (`createTenant` action) runs `CREATE SCHEMA` followed by the full CDS-generated DDL, all on the same request transaction so it's atomic.
 
 ---
 
@@ -152,16 +157,19 @@ You should see `[mtxpg] schema-per-tenant routing enabled` in the log.
 
 ```bash
 curl -X POST http://localhost:4004/odata/v4/tenant/createTenant \
+  -u operator:operator \
   -H "Content-Type: application/json" \
   -d '{"tenantId":"acme","name":"ACME Corp"}'
 ```
 
 Effect:
-- `CREATE SCHEMA "tenant_acme"`
-- All business tables created inside `tenant_acme`
+- `CREATE SCHEMA "tenant_acme_<hash>"`
+- All business tables created inside that schema
 - A row inserted into `public.db_Tenants` with `status = 'ACTIVE'`
 
-All in a single transaction — if any DDL fails, the registry row rolls back.
+All in a single transaction — if any DDL fails, the registry row rolls back. Re-running the same call is idempotent.
+
+`tenantId` must be non-empty and at most 50 characters; anything else is a 400.
 
 ### Tenant-scoped queries
 
@@ -172,9 +180,22 @@ curl http://localhost:4004/odata/v4/business/Products \
   -H "x-tenant-id: acme"
 ```
 
-The middleware looks up the tenant in `db_Tenants`, sets `cds.context.tenant = 'acme'`, and the `db.before('*')` hook runs `SET LOCAL search_path TO "tenant_acme", public` on the transaction. CAP queries against `db.Products` resolve to `tenant_acme.db_Products`.
+The middleware looks up the tenant in `db_Tenants`, sets `cds.context.tenant = 'acme'`, and the `db.before('*')` hook runs `SET LOCAL search_path TO "tenant_acme_<hash>"` on the transaction. CAP queries against `db.Products` resolve to that schema.
 
-Other recognised tenant headers (in order): `x-tenant-id`, `sap-tenancy`, `?tenant=` query param, `req.user.tenant`.
+Tenant resolution order:
+
+1. `req.user.tenant` — the authenticated identity. Wins over everything else, because it is the only source the caller cannot choose.
+2. `x-tenant-id` header
+3. `sap-tenancy` header
+4. `?tenant=` query parameter — **ignored unless** `cds.env.mtxpg.allowQueryTenant` is explicitly enabled.
+
+If the caller is authenticated to one tenant and names a different one in a header, the request is rejected with 403.
+
+The `?tenant=` parameter is off by default because it is an unauthenticated tenant-selection channel: it would let anyone who guesses a tenant id read that tenant's data with a plain URL, and tenant ids would leak into access logs, `Referer` headers and browser history. Enable it only for local development:
+
+```json
+{ "cds": { "mtxpg": { "allowQueryTenant": true } } }
+```
 
 ### Offboard a tenant
 
@@ -196,6 +217,63 @@ Drops `tenant_acme` (CASCADE) and removes the registry row.
 | `GET  /odata/v4/tenant/listTenants()` | Returns array of active tenant IDs |
 | `GET  /odata/v4/tenant/Tenants` | Standard CRUD over the registry |
 
+Every one of these requires the `mtxpg-admin` role — see [Security model](#security-model). None of them return the `config` field.
+
+---
+
+## Security model
+
+Two separate concerns, and mtxpg only owns one of them.
+
+### `TenantService` requires the `mtxpg-admin` role
+
+Tenant onboarding and offboarding create and `DROP SCHEMA … CASCADE` real customer data, so the service is annotated `@requires: 'mtxpg-admin'` and ships closed. Grant the role to your operators:
+
+```json
+{
+  "cds": {
+    "requires": {
+      "auth": {
+        "kind": "xsuaa",
+        "restrict_all_services": false
+      }
+    }
+  }
+}
+```
+
+…and map `mtxpg-admin` in your `xs-security.json` role collections. For local development with mocked auth:
+
+```json
+{
+  "cds": {
+    "requires": {
+      "auth": {
+        "kind": "mocked",
+        "users": { "operator": { "password": "operator", "roles": ["mtxpg-admin"] } }
+      }
+    }
+  }
+}
+```
+
+Widen it if you need to — `@requires` can be overridden with a CDS aspect — but do it deliberately. Without the role, every authenticated user, including any regular tenant user, could enumerate the registry and delete other tenants.
+
+### `setTenantContext` is resolution, not authorization
+
+The middleware answers *"which tenant is this request for, and is it usable?"* — it validates that the tenant exists and is `ACTIVE`, and that the claimed tenant matches the authenticated user when there is one. It does **not** authenticate the caller.
+
+You are responsible for:
+
+- authenticating the request (CAP's `auth` middleware, or your own) **before** `setTenantContext` runs, and
+- binding that identity to a tenant, so `req.user.tenant` is populated.
+
+Mounting `setTenantContext` on a route that anyone can reach means anyone can pick a tenant with a header. That is a supported deployment (single-tenant-per-deployment, trusted network) but it is a decision, not a default.
+
+### Do not store secrets in `config`
+
+`db.Tenants.config` is a free-form `LargeString`. `TenantService` never returns it — neither the `Tenants` projection nor `getTenantInfo` exposes it — but it is stored in plaintext in `public.db_Tenants` and readable by anything with database access. Put credentials in a secret store and reference them from `config` instead.
+
 ---
 
 ## Public API
@@ -213,19 +291,36 @@ const {
 
 | Method | Description |
 |---|---|
-| `getSchemaName(tenantId)` | Returns `tenant_<sanitized-id>` |
-| `ensureTenantSchema(tenantId, tx?)` | Creates schema and deploys DDL |
+| `getSchemaName(tenantId)` | Returns `tenant_<slug>_<hash>` |
+| `ensureTenantSchema(tenantId, tx?)` | Creates schema and deploys DDL. Idempotent |
 | `dropTenantSchema(tenantId, tx?)` | `DROP SCHEMA … CASCADE` |
+| `assertValidTenantId(tenantId)` | Throws unless non-empty and ≤ 50 characters |
 
-Pass `tx` (a CAP DB transaction, e.g. `db.tx(req)`) to keep the operation on the request's connection. Omit it for standalone use.
+Pass `tx` (a CAP DB transaction, e.g. `db.tx(req)`) to make the operation atomic with the caller's own work. Omit it for standalone use — `ensureTenantSchema` then opens its own transaction, which it must: `SET LOCAL` is a no-op outside a transaction block, and autocommitted statements may land on different pooled connections, so the DDL would execute against the default `search_path` (i.e. into `public`).
+
+`ensureTenantSchema` leaves the transaction's `search_path` on `public` when it returns, so a registry write can follow it on the same `tx`.
+
+#### Schema naming
+
+`getSchemaName` is **injective** — distinct tenant ids always map to distinct schemas. The readable slug (non-`[a-zA-Z0-9_]` rewritten to `_`, lowercased) is lossy on its own: `acme-corp`, `acme.corp` and `ACME_CORP` all flatten to `acme_corp`. A 6-character hash of the raw id is therefore appended, keeping the name recognisable to an operator while guaranteeing that two customers never share a schema. Total length is capped at PostgreSQL's 63-byte identifier limit, since silent truncation is itself a collision.
 
 ### `setTenantContext(req, res, next)`
 
-Express middleware. Validates the tenant header, looks up the tenant in `db_Tenants`, rejects with 400 (missing header), 404 (unknown tenant), or 403 (inactive tenant), then sets `cds.context.tenant`.
+Express middleware. Resolves the tenant, looks it up in `db_Tenants`, then sets `cds.context.tenant`. Rejects with:
+
+| Status | Reason |
+|---|---|
+| 400 | No tenant could be resolved |
+| 403 | Claimed tenant does not match the authenticated user |
+| 404 | Unknown tenant |
+| 403 | Tenant is not `ACTIVE` |
+| 500 | Lookup failed (details go to the `mtxpg` log, not the response) |
+
+Tenant resolution, not authorization — see [Security model](#security-model).
 
 ### `getTenantFromRequest(req)`
 
-Returns the tenant ID extracted from request headers / query / user, or `null`.
+Returns the resolved tenant ID, or `null`. `req.user.tenant` outranks caller-supplied headers; see the resolution order under [Tenant-scoped queries](#tenant-scoped-queries).
 
 ---
 
@@ -239,15 +334,21 @@ Returns the tenant ID extracted from request headers / query / user, or `null`.
 | `using from 'mtxpg/src/db/schema'`  | `db/schema.cds` | yes | Brings `db.Tenants` into the deployable model |
 | `using from 'mtxpg/src/srv/tenant-service'` | a file under `srv/` | yes | Brings `TenantService` into the served model |
 | `require('mtxpg')` | `server.js` | yes | Registers the `db.before('*')` search_path hook |
+| `cds.requires.auth` + `mtxpg-admin` role | `package.json` / `xs-security.json` | yes | Required to call `TenantService` at all |
+| `cds.mtxpg.allowQueryTenant` | `package.json` | no | Default `false`. Enables `?tenant=`; dev only |
 
 ---
 
 ## Operational notes
 
-- **DDL changes to business entities** require redeploying every tenant schema. The package does not currently auto-replay DDL; you can call `TenantManager.ensureTenantSchema(id)` against existing tenants to apply additions (CAP emits `CREATE TABLE IF NOT EXISTS`-equivalent or schema-evolution statements depending on your CAP version).
+- **DDL changes to business entities** require replaying the DDL into every tenant schema. `CREATE TABLE` / `CREATE VIEW` are rewritten to `CREATE TABLE IF NOT EXISTS` / `CREATE OR REPLACE VIEW`, so calling `TenantManager.ensureTenantSchema(id)` against an existing tenant adds new tables and redefines views. It does **not** alter existing tables — adding a column to an already-deployed entity still needs a migration step of your own.
 - **The DDL is cached in process memory** after the first `createTenant` call. Restart the server after schema changes.
+- **`createTenant` is idempotent.** Re-running it against an existing tenant re-applies the DDL and leaves the registry row untouched, so onboarding retries are safe.
+- **`tenantId` is immutable.** `PATCH /Tenants(ID)` rejects a change to `tenantId` with 400: the schema name is derived from it, so a rename would leave the registry pointing at a schema that does not exist. Delete and re-create instead.
 - **Transactions**: `createTenant` and `deleteTenant` are atomic with their registry update. The `SET LOCAL search_path` only affects the current transaction, so search_path leakage between requests is not possible.
-- **The `db_Tenants` table lives in `public`**. The `db.before('*')` hook explicitly skips `db.Tenants` so registry queries fall through to `public` instead of the tenant schema.
+- **The `db_Tenants` table lives in `public`**. The `db.before('*')` hook routes registry targets (`db.Tenants` and any projection on it) to `public` explicitly, rather than relying on `search_path` resolution order.
+- **Schema existence is cached per process.** The hook verifies a tenant schema exists before pinning `search_path` to it, and remembers the positive result. Dropping a tenant schema by hand under a running server leaves that cache stale — restart after manual surgery.
+- **Errors are generic by design.** Provisioning and middleware failures return `Tenant creation failed` / `Tenant resolution failed`; the cause goes to the `mtxpg` log. Raw PostgreSQL text discloses schema names, column types and table existence, so check the log rather than the response body.
 
 ---
 
@@ -257,7 +358,10 @@ Returns the tenant ID extracted from request headers / query / user, or `null`.
 |---|---|---|
 | `Service "TenantService" has no handler for "undefined"` | Calling `req.tx.run(rawSQL)` — `req.tx` is the service tx, not the DB tx | Use `(await cds.connect.to('db')).tx(req).run(...)` |
 | `Generated foreign key element "X_ID" … conflicts with existing element` | DDL generated from runtime CSN (already has FKs materialised) | `TenantManager._tenantDDL()` loads a fresh CSN via `cds.load('*')` — make sure the cached DDL is invalidated on schema change |
-| Tables created in `public` only, none in tenant schema | `search_path` not set before DDL | Confirm `SET LOCAL search_path` runs first in `ensureTenantSchema` |
+| Tables created in `public` only, none in tenant schema | `search_path` not set before DDL | Confirm `SET LOCAL search_path` runs first in `ensureTenantSchema`, and that the DDL runs inside a transaction |
+| `Tenant '<id>' is not provisioned` on a business request | Registry row exists but its schema does not | Re-run `createTenant` for that tenant (idempotent). This is the fail-closed path that used to silently read `public` |
+| `401` from every `/odata/v4/tenant` call | Caller lacks the `mtxpg-admin` role | Grant the role — see [Security model](#security-model) |
+| `tenantId is immutable` on `PATCH /Tenants(ID)` | Rename attempted | Delete and re-create the tenant; the schema name is derived from `tenantId` |
 | Views fail to deploy in tenant schemas | View bodies referenced public tables | Same fix — `search_path` must be set before `CREATE VIEW` |
 | `npm run deploy` does nothing | `scripts/deploy.js` `require()`'d `cds-deploy.js`, which short-circuits its CLI block via `if (!module.parent)` | Spawn `cds-deploy` as a child process (already in this repo's wrapper) |
 | `cds.fiori.lean_draft` error on startup | Missing config | Add `"fiori": { "lean_draft": true }` to `cds` config |
@@ -274,13 +378,21 @@ The package ships with a Jest suite covering both unit-level helpers and end-to-
 mtxpg/test/
 ├── unit/                       # pure functions, no DB
 │   ├── sanitize.test.js
+│   ├── schema-name-collision.test.js   # schema names must be injective
 │   └── get-tenant-from-request.test.js
 ├── integration/                # boots the host CAP project against real Postgres
 │   └── multitenancy.test.js
+├── hardening/                  # regression suite for the audited defects
+│   └── hardening.test.js
+├── destructive/                # isolated: asserts a bad request cannot kill the server
+│   └── process-crash.test.js
 └── helpers/
     ├── pg.js                   # direct pg client for schema introspection
+    ├── server.js               # spawns the host project; supplies the admin credentials
     └── tenant-id.js            # generates collision-free `jest_<ts>_<rand>` IDs
 ```
+
+`hardening/` is written against the behaviour mtxpg **must** have, so a failure there is a real open defect rather than a stale expectation. `destructive/` is a separate Jest project because a crash would fail every test sharing the run.
 
 ### Prerequisites for integration tests
 
@@ -288,28 +400,32 @@ mtxpg/test/
 2. **The host project has been deployed** at least once (`npm run deploy` from the parent), so `public.db_Tenants` and the business tables exist as a template.
 3. **The host project is wired** as described in the Setup section (CDS imports + `require('mtxpg')` in `server.js`).
 
-The integration suite calls `cds.test('<host-project-root>')`, which boots the parent CAP app — that's why the host wiring matters even for tests living inside the package.
+The server-backed suites spawn the parent CAP app as a child process (`npx cds-serve`) and drive it over HTTP — that's why the host wiring matters even for tests living inside the package. `TenantService` requires the `mtxpg-admin` role, so `test/helpers/server.js` injects a mock admin user into the spawned server via a `CDS_REQUIRES_AUTH_USERS` override and exports its `Authorization` header; the host project needs no test-only auth config of its own.
 
 ### Running
 
 From inside `mtxpg/`:
 
 ```bash
-npm install              # installs jest, pg, @cap-js/cds-test (devDeps)
-npm run test:unit        # ~1s, no DB required
-npm run test:integration # boots CAP, hits real Postgres
-npm test                 # both, in band
+npm install               # installs jest, pg, axios (devDeps)
+npm run test:unit         # ~1s, no DB required
+npm run test:integration  # boots CAP, hits real Postgres
+npm run test:hardening    # regression suite for the audited defects
+npm run test:destructive   # isolated — kills the server on purpose
+npm test                  # unit + integration
+npm run test:all          # all four, in order
 ```
 
-`--runInBand` is enforced because `cds.test()` boots a single shared HTTP server per Jest worker; running test files in parallel would clobber it.
+`--runInBand` is enforced because each project boots a single shared HTTP server; running test files in parallel would clobber it. Set `TEST_SERVER_LOG=1` to forward the spawned server's output — necessary when debugging a 500, since error responses are deliberately generic.
 
 ### What's covered
 
 | Layer | Scenario |
 |---|---|
-| Unit | `sanitize` — special chars, lowercasing, falsy-input rejection, SQL-injection-shaped inputs |
-| Unit | `getSchemaName` — deterministic, prefixed, propagates sanitize errors |
-| Unit | `getTenantFromRequest` — header priority chain (`x-tenant-id` > `sap-tenancy` > query > user) |
+| Unit | `sanitize` — identifier-safe output, lowercasing, falsy-input rejection, SQL-injection-shaped inputs |
+| Unit | `getSchemaName` — injective across colliding id pairs, deterministic, within the 63-byte limit |
+| Unit | `assertValidTenantId` — rejects ids over the declared `String(50)` |
+| Unit | `getTenantFromRequest` — `req.user.tenant` outranks headers; `?tenant=` ignored unless opted in |
 | Integration | `createTenant` provisions the schema and a registry row |
 | Integration | Tenant schema contains business tables but **not** `db_Tenants` |
 | Integration | `listTenants` / `getTenantInfo` reflect the new tenant |
@@ -321,7 +437,19 @@ npm test                 # both, in band
 | Integration | Missing `x-tenant-id` → 400 |
 | Integration | Unknown tenant → 404 |
 | Integration | Inactive tenant → 403 |
-| Integration | `db.before('*')` hook skips `target === 'db.Tenants'` so registry queries stay in `public` |
+| Integration | `db.before('*')` hook routes registry targets to `public` |
+| Hardening | A tenant whose schema is missing fails closed — no write, nothing in `public`, no leak to another tenant |
+| Hardening | Concurrent writes from different tenants stay in their own schemas |
+| Hardening | `?tenant=` grants no data access on its own |
+| Hardening | The registry is not world-readable |
+| Hardening | `deleteTenant` 404s on an unknown tenant instead of reporting success |
+| Hardening | `deleteTenant` never drops a schema belonging to a different tenant |
+| Hardening | `createTenant` is idempotent — no 500, no duplicate registry row |
+| Hardening | An over-long `tenantId` is a 400 with no raw DB text |
+| Hardening | `PATCH /Tenants(ID)` never leaves the registry pointing at a missing schema |
+| Hardening | `DELETE /Tenants(ID)` actually removes the schema and the row |
+| Hardening | `POST /Tenants` responds 201 and leaks no open transaction |
+| Destructive | `POST /Tenants` with no `tenantId` returns 400 and the process survives |
 
 ### Cleanup
 
@@ -334,13 +462,43 @@ DELETE FROM public.db_Tenants WHERE "tenantId" LIKE 'jest_%';
 
 ### CI / pre-publish gate
 
-Wire `npm test` into your CI step. A green run validates:
+Wire `npm run test:all` into your CI step. A green run validates:
 - the public API surface still works,
-- the search_path hook is in place,
+- the search_path hook is in place and fails closed,
 - DDL still emits cleanly for the host model,
-- the middleware still rejects bad requests with the documented status codes.
+- the middleware still rejects bad requests with the documented status codes,
+- the control plane is still closed to unauthorized callers,
+- none of the audited defects have regressed.
 
-Bump the package version only after `npm test` passes against the supported Postgres version.
+Bump the package version only after `npm run test:all` passes against the supported Postgres version.
+
+---
+
+## Upgrading to 0.6
+
+Three breaking changes, all of them closing defects that could leak or destroy tenant data.
+
+### 1. Schema names changed
+
+`getSchemaName` now appends a hash: `tenant_acme` becomes `tenant_acme_<hash>`. Existing tenant schemas will not be found under their old names. For each existing tenant, rename the schema before starting the new version:
+
+```sql
+-- print the new name for every registered tenant first:
+--   node -e "console.log(require('mtxpg').TenantManager.getSchemaName('acme'))"
+ALTER SCHEMA "tenant_acme" RENAME TO "tenant_acme_1f3d9c";
+```
+
+If two of your existing tenant ids collided onto one schema, they were already sharing data — split them before upgrading, because the new naming will route them apart and each will then see only what the rename left behind.
+
+### 2. `TenantService` requires the `mtxpg-admin` role
+
+Previously reachable with whatever the host's default auth allowed. Grant the role to your operators or every `/odata/v4/tenant` call returns 401. See [Security model](#security-model).
+
+### 3. `?tenant=` no longer selects a tenant
+
+Set `cds.mtxpg.allowQueryTenant` to re-enable it for local development. Anything relying on it in production was an unauthenticated cross-tenant read.
+
+Also worth knowing: `config` is no longer returned by `getTenantInfo` or `GET /Tenants`, error responses no longer carry PostgreSQL text (check the `mtxpg` log instead), and a tenant whose schema is missing now fails with `Tenant '<id>' is not provisioned` rather than silently reading `public`.
 
 ---
 

@@ -19,7 +19,7 @@
 const axios = require('axios');
 const TenantManager = require('../../src/adapter/pg-adapter');
 const { newTenantId, PREFIX } = require('../helpers/tenant-id');
-const { BASE_URL } = require('../helpers/server');
+const { BASE_URL, AUTH } = require('../helpers/server');
 const {
   schemaExists,
   listTablesInSchema,
@@ -31,13 +31,16 @@ const {
 
 // HTTP client — never throw on non-2xx so we can assert codes.
 const http = axios.create({ baseURL: BASE_URL, validateStatus: () => true });
+// TenantService is `@requires: 'mtxpg-admin'`; the control-plane calls below are
+// authenticated as the test admin. Business routes stay unauthenticated.
+const admin = axios.create({ baseURL: BASE_URL, validateStatus: () => true, headers: AUTH });
 
 const ODATA_TENANT = '/odata/v4/tenant';
 const ODATA_BUSINESS = '/odata/v4/business';
 
 const createdTenants = new Set();
 async function provision(tenantId, name = tenantId) {
-  const res = await http.post(`${ODATA_TENANT}/createTenant`, { tenantId, name });
+  const res = await admin.post(`${ODATA_TENANT}/createTenant`, { tenantId, name });
   createdTenants.add(tenantId);
   return res;
 }
@@ -73,7 +76,7 @@ describe('Tenant lifecycle (TenantService)', () => {
   test('listTenants returns the new tenant', async () => {
     const tenantId = newTenantId();
     await provision(tenantId);
-    const res = await http.get(`${ODATA_TENANT}/listTenants()`);
+    const res = await admin.get(`${ODATA_TENANT}/listTenants()`);
     expect(res.status).toBe(200);
     expect(res.data.value).toEqual(expect.arrayContaining([tenantId]));
   });
@@ -81,14 +84,14 @@ describe('Tenant lifecycle (TenantService)', () => {
   test('getTenantInfo returns serialized tenant record', async () => {
     const tenantId = newTenantId();
     await provision(tenantId, 'Lookup Co');
-    const res = await http.get(`${ODATA_TENANT}/getTenantInfo(tenantId='${tenantId}')`);
+    const res = await admin.get(`${ODATA_TENANT}/getTenantInfo(tenantId='${tenantId}')`);
     expect(res.status).toBe(200);
     const tenant = JSON.parse(res.data.value);
     expect(tenant).toMatchObject({ tenantId, name: 'Lookup Co', status: 'ACTIVE' });
   });
 
   test('createTenant rejects when tenantId is missing', async () => {
-    const res = await http.post(`${ODATA_TENANT}/createTenant`, { name: 'no-id' });
+    const res = await admin.post(`${ODATA_TENANT}/createTenant`, { name: 'no-id' });
     expect([400, 500]).toContain(res.status);
   });
 
@@ -98,11 +101,11 @@ describe('Tenant lifecycle (TenantService)', () => {
     const schema = TenantManager.getSchemaName(tenantId);
     expect(await schemaExists(schema)).toBe(true);
 
-    const res = await http.post(`${ODATA_TENANT}/deleteTenant`, { tenantId });
+    const res = await admin.post(`${ODATA_TENANT}/deleteTenant`, { tenantId });
     expect(res.status).toBe(200);
     expect(await schemaExists(schema)).toBe(false);
 
-    const list = await http.get(`${ODATA_TENANT}/listTenants()`);
+    const list = await admin.get(`${ODATA_TENANT}/listTenants()`);
     expect(list.data.value).not.toContain(tenantId);
 
     createdTenants.delete(tenantId);
@@ -210,7 +213,7 @@ describe('db.before(*) hook', () => {
 
     // listTenants reads db.Tenants. The hook must not override search_path
     // for this entity, even when a tenant context is present.
-    const res = await http.get(`${ODATA_TENANT}/listTenants()`);
+    const res = await admin.get(`${ODATA_TENANT}/listTenants()`);
     expect(res.status).toBe(200);
     expect(res.data.value).toEqual(expect.arrayContaining([tenantId]));
   });

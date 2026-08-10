@@ -17,5 +17,22 @@ module.exports = {
       globalSetup: '<rootDir>/test/global-setup.js',
       globalTeardown: '<rootDir>/test/global-teardown.js',
     },
+    {
+      // Audit suite: asserts the behaviour mtxpg must have before publishing.
+      // Gets its own server so a failure here cannot poison the other projects.
+      displayName: 'hardening',
+      testEnvironment: 'node',
+      testMatch: ['<rootDir>/test/hardening/**/*.test.js'],
+      globalSetup: '<rootDir>/test/global-setup.js',
+      globalTeardown: '<rootDir>/test/global-teardown.js',
+    },
+    {
+      // Kills the server process — never run alongside the others.
+      displayName: 'destructive',
+      testEnvironment: 'node',
+      testMatch: ['<rootDir>/test/destructive/**/*.test.js'],
+      globalSetup: '<rootDir>/test/global-setup.js',
+      globalTeardown: '<rootDir>/test/global-teardown.js',
+    },
   ],
 };
