@@ -1,3 +1,4 @@
+const cds = require('@sap/cds');
 const { getTenantFromRequest } = require('../../src/middleware/tenant-middleware');
 
 const req = (overrides = {}) => ({ headers: {}, query: {}, user: {}, ...overrides });
@@ -11,11 +12,7 @@ describe('getTenantFromRequest(req)', () => {
     expect(getTenantFromRequest(req({ headers: { 'sap-tenancy': 'globex' } }))).toBe('globex');
   });
 
-  test('falls back to ?tenant= query param', () => {
-    expect(getTenantFromRequest(req({ query: { tenant: 'initech' } }))).toBe('initech');
-  });
-
-  test('falls back to req.user.tenant', () => {
+  test('uses req.user.tenant', () => {
     expect(getTenantFromRequest(req({ user: { tenant: 'umbrella' } }))).toBe('umbrella');
   });
 
@@ -23,22 +20,44 @@ describe('getTenantFromRequest(req)', () => {
     expect(getTenantFromRequest(req())).toBeNull();
   });
 
-  test('header order: x-tenant-id > sap-tenancy > query > user', () => {
+  // The authenticated identity is the only source the caller cannot choose, so
+  // it must outrank every header. Otherwise an application that binds the tenant
+  // to a verified JWT claim is silently overridden by a request header.
+  test('req.user.tenant outranks any caller-supplied header', () => {
     const r = req({
-      headers: { 'x-tenant-id': 'first', 'sap-tenancy': 'second' },
-      query: { tenant: 'third' },
-      user: { tenant: 'fourth' },
+      headers: { 'x-tenant-id': 'attacker', 'sap-tenancy': 'attacker2' },
+      query: { tenant: 'attacker3' },
+      user: { tenant: 'trusted' },
     });
-    expect(getTenantFromRequest(r)).toBe('first');
+    expect(getTenantFromRequest(r)).toBe('trusted');
+  });
 
-    const r2 = req({
-      headers: { 'sap-tenancy': 'second' },
-      query: { tenant: 'third' },
-      user: { tenant: 'fourth' },
-    });
-    expect(getTenantFromRequest(r2)).toBe('second');
+  test('header order among caller-supplied sources: x-tenant-id > sap-tenancy', () => {
+    expect(
+      getTenantFromRequest(req({ headers: { 'x-tenant-id': 'first', 'sap-tenancy': 'second' } })),
+    ).toBe('first');
+    expect(getTenantFromRequest(req({ headers: { 'sap-tenancy': 'second' } }))).toBe('second');
+  });
+});
 
-    const r3 = req({ query: { tenant: 'third' }, user: { tenant: 'fourth' } });
-    expect(getTenantFromRequest(r3)).toBe('third');
+describe('?tenant= query parameter', () => {
+  afterEach(() => {
+    delete cds.env.mtxpg;
+  });
+
+  test('is ignored by default — it is an unauthenticated tenant-selection channel', () => {
+    expect(getTenantFromRequest(req({ query: { tenant: 'initech' } }))).toBeNull();
+  });
+
+  test('is honoured only behind the explicit cds.env.mtxpg.allowQueryTenant opt-in', () => {
+    cds.env.mtxpg = { allowQueryTenant: true };
+    expect(getTenantFromRequest(req({ query: { tenant: 'initech' } }))).toBe('initech');
+  });
+
+  test('even when opted in, it does not outrank the authenticated user', () => {
+    cds.env.mtxpg = { allowQueryTenant: true };
+    expect(
+      getTenantFromRequest(req({ query: { tenant: 'initech' }, user: { tenant: 'trusted' } })),
+    ).toBe('trusted');
   });
 });

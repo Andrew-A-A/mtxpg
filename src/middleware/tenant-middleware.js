@@ -1,18 +1,43 @@
-/* eslint-disable no-console */
 const cds = require('@sap/cds');
 
-function getTenantFromRequest(req) {
+const LOG = cds.log('mtxpg');
+
+// Off by default. A tenant in the URL leaks into access logs, Referer headers
+// and browser history, and is trivially guessable — enable only for local dev.
+function queryTenantAllowed() {
+  return Boolean(cds.env.mtxpg && cds.env.mtxpg.allowQueryTenant);
+}
+
+function claimedTenant(req) {
   return (
     req.headers['x-tenant-id'] ||
     req.headers['sap-tenancy'] ||
-    (req.query && req.query.tenant) ||
-    (req.user && req.user.tenant) ||
+    (queryTenantAllowed() && req.query && req.query.tenant) ||
     null
   );
 }
 
-// Express middleware: validates the tenant header and propagates it via
-// cds.context so the search_path hook in `index.js` sees it on every query.
+function authenticatedTenant(req) {
+  return (req.user && req.user.tenant) || null;
+}
+
+// Resolves the tenant for the request.
+//
+// `req.user.tenant` wins: it is the only source the caller cannot choose. Every
+// other source is caller-supplied, so if they were allowed to take precedence an
+// application that binds the tenant to a verified JWT claim would be silently
+// overridden by a header or a URL parameter.
+function getTenantFromRequest(req) {
+  return authenticatedTenant(req) || claimedTenant(req);
+}
+
+// Express middleware: resolves the tenant and propagates it via cds.context so
+// the search_path hook in `index.js` sees it on every query.
+//
+// This is tenant RESOLUTION, not authorization. It validates that the tenant
+// exists, is active, and matches the authenticated user when there is one. It
+// does not authenticate the caller — mount it behind whatever authentication the
+// application uses.
 //
 // Implementation notes:
 //   - The DB query is run against the DB service explicitly (`db.run(...)`),
@@ -23,7 +48,15 @@ function getTenantFromRequest(req) {
 //     propagates to downstream handlers in the same request scope.
 async function setTenantContext(req, res, next) {
   try {
-    const tenantId = getTenantFromRequest(req);
+    const authenticated = authenticatedTenant(req);
+    const claimed = claimedTenant(req);
+
+    // A caller bound to one tenant must not be able to name another.
+    if (authenticated && claimed && claimed !== authenticated) {
+      return res.status(403).json({ error: 'Tenant does not match the authenticated user' });
+    }
+
+    const tenantId = authenticated || claimed;
     if (!tenantId) {
       return res.status(400).json({ error: 'Missing x-tenant-id header' });
     }
@@ -39,8 +72,10 @@ async function setTenantContext(req, res, next) {
     req.tenant = tenantId;
     next();
   } catch (err) {
-    console.error('[mtxpg] tenant middleware error:', err);
-    res.status(500).json({ error: err.message });
+    // Log the cause, return a generic message. Raw Postgres text discloses
+    // schema names, column types and table existence.
+    LOG.error('tenant middleware error', err);
+    res.status(500).json({ error: 'Tenant resolution failed' });
   }
 }
 

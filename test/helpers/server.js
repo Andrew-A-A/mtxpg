@@ -9,6 +9,15 @@ const PORT = Number(process.env.TEST_PORT || 4044); // off the dev port to avoid
 const BASE_URL = `http://localhost:${PORT}`;
 const PID_FILE = path.join(__dirname, '..', '.server.pid');
 
+// TenantService is annotated `@requires: 'mtxpg-admin'`, so the suite needs a
+// caller holding that role. Injected into the spawned server's mocked-auth users
+// via a CDS_* env override rather than committed to the host project's config.
+const ADMIN = { user: 'mtxpg_test_admin', password: 'mtxpg_test_admin' };
+const ADMIN_ROLE = 'mtxpg-admin';
+const AUTH = {
+  Authorization: `Basic ${Buffer.from(`${ADMIN.user}:${ADMIN.password}`).toString('base64')}`,
+};
+
 function waitForHealth(timeoutMs = 60000) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
@@ -31,7 +40,15 @@ function waitForHealth(timeoutMs = 60000) {
 async function startServer() {
   const child = spawn('npx', ['cds-serve', '--port', String(PORT)], {
     cwd: PROJECT_ROOT,
-    env: { ...process.env, PORT: String(PORT), NODE_ENV: 'test' },
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      NODE_ENV: 'test',
+      // Merges with CAP's default mocked users rather than replacing them.
+      CDS_REQUIRES_AUTH_USERS: JSON.stringify({
+        [ADMIN.user]: { password: ADMIN.password, roles: [ADMIN_ROLE] },
+      }),
+    },
     stdio: process.env.TEST_SERVER_LOG ? 'inherit' : ['ignore', 'ignore', 'ignore'],
     shell: true,
     detached: process.platform !== 'win32', // detach on POSIX so SIGTERM kills the group
@@ -65,7 +82,11 @@ function stopServer() {
   } catch {
     /* already gone */
   }
-  try { fs.unlinkSync(PID_FILE); } catch {}
+  try {
+    fs.unlinkSync(PID_FILE);
+  } catch {
+    /* no pid file to clean up */
+  }
 }
 
-module.exports = { startServer, stopServer, BASE_URL, PORT };
+module.exports = { startServer, stopServer, BASE_URL, PORT, AUTH, ADMIN, ADMIN_ROLE };

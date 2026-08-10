@@ -1,6 +1,6 @@
 {
   "name": "mtxpg",
-  "version": "0.5",
+  "version": "0.6.0",
   "description": "Schema-per-tenant multitenancy for SAP CAP on PostgreSQL",
   "main": "index.js",
   "files": [
@@ -12,9 +12,12 @@
     "index.js"
   ],
   "scripts": {
-    "test": "jest --runInBand",
+    "test": "jest --runInBand --selectProjects unit integration",
     "test:unit": "jest --runInBand --selectProjects unit",
-    "test:integration": "jest --runInBand --selectProjects integration"
+    "test:integration": "jest --runInBand --selectProjects integration",
+    "test:hardening": "jest --runInBand --selectProjects hardening",
+    "test:destructive": "jest --runInBand --selectProjects destructive",
+    "test:all": "npm run test && npm run test:hardening && npm run test:destructive"
   },
   "peerDependencies": {
     "@sap/cds": ">=8",
