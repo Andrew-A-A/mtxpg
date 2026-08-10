@@ -6,6 +6,10 @@ Each tenant gets its own PostgreSQL schema (`tenant_<slug>_<hash>`). The CDS mod
 
 > **Read this before wiring it up:** `TenantService` is a control-plane API and ships behind the `mtxpg-admin` role, and `setTenantContext` performs tenant *resolution*, not authorization. See [Security model](#security-model).
 
+**Requirements:** Node >= 18 · `@sap/cds` >= 8 · `@cap-js/postgres` >= 1 · PostgreSQL 12+. Both CAP packages are peer dependencies — mtxpg does not bundle them.
+
+Read [Limitations](#limitations) before adopting. mtxpg deliberately does *not* implement everything `@sap/cds-mtxs` does.
+
 ---
 
 ## How it works
@@ -45,10 +49,10 @@ In your CAP project:
 
 ```bash
 npm install @sap/cds @cap-js/postgres
-npm install file:./mtxpg   # or however you vendor mtxpg
+npm install mtxpg
 ```
 
-`@cap-js/postgres` and `@sap/cds` (>=8) are peer dependencies.
+`@cap-js/postgres` and `@sap/cds` (>=8) are peer dependencies — install them yourself; mtxpg will not pull them in.
 
 ### 2. Configure `package.json`
 
@@ -57,7 +61,7 @@ npm install file:./mtxpg   # or however you vendor mtxpg
   "dependencies": {
     "@sap/cds": "^8",
     "@cap-js/postgres": "^1",
-    "mtxpg": "file:./mtxpg"
+    "mtxpg": "^0.6.0"
   },
   "scripts": {
     "start":  "cds-serve",
@@ -68,11 +72,11 @@ npm install file:./mtxpg   # or however you vendor mtxpg
       "db": {
         "kind": "postgres",
         "credentials": {
-          "host":     "DB_HOST",
-          "port":     "DB_PORT",
-          "database": "DB_NAME",
-          "user":     "DB_USER",
-          "password": "DB_PASSWORD",
+          "host":     "localhost",
+          "port":     5432,
+          "database": "my_database",
+          "user":     "postgres",
+          "password": "postgres",
           "ssl":      false
         }
       }
@@ -81,6 +85,22 @@ npm install file:./mtxpg   # or however you vendor mtxpg
   }
 }
 ```
+
+#### Credentials from the environment
+
+**CAP does not expand env-var names inside `credentials`.** Writing `"host": "DB_HOST"` connects to a host literally called `DB_HOST` — verified, not theoretical. To source credentials from the environment, use CAP's `CDS_*` config overrides, which map onto the `cds.requires.*` path:
+
+```bash
+CDS_REQUIRES_DB_CREDENTIALS_HOST=db.internal
+CDS_REQUIRES_DB_CREDENTIALS_PORT=5432
+CDS_REQUIRES_DB_CREDENTIALS_DATABASE=my_database
+CDS_REQUIRES_DB_CREDENTIALS_USER=app
+CDS_REQUIRES_DB_CREDENTIALS_PASSWORD=…
+```
+
+These are read by `@sap/cds` itself, so they work whether they come from a real environment, a `.env` file loaded by `dotenv`, or a platform binding. A plain `.env` with `DB_HOST=…` names is **not** picked up by the db config on its own — either rename the variables as above, or read `process.env` yourself in `server.js` and assign into `cds.env.requires.db.credentials` before the db service connects.
+
+On SAP BTP, prefer a real service binding (`VCAP_SERVICES`), which CAP resolves without any of this.
 
 ### 3. Pull the tenant model into your project
 
@@ -147,7 +167,7 @@ This runs `cds-deploy` against the configured PostgreSQL database and creates `p
 npm start
 ```
 
-You should see `[mtxpg] schema-per-tenant routing enabled` in the log.
+You should see `schema-per-tenant routing enabled` from the `mtxpg` logger. All mtxpg output goes through `cds.log('mtxpg')`, so it obeys CAP's logging config — silence it with `CDS_LOG_LEVELS_MTXPG=error`.
 
 ---
 
@@ -205,7 +225,7 @@ curl -X POST http://localhost:4004/odata/v4/tenant/deleteTenant \
   -d '{"tenantId":"acme"}'
 ```
 
-Drops `tenant_acme` (CASCADE) and removes the registry row.
+Looks the tenant up in the registry, then drops `tenant_acme_<hash>` (CASCADE) and removes its row. An unknown `tenantId` is a 404, not a silent success.
 
 ### Other actions
 
@@ -282,9 +302,19 @@ Mounting `setTenantContext` on a route that anyone can reach means anyone can pi
 const {
   TenantManager,        // class — schema lifecycle
   setTenantContext,     // Express middleware
-  getTenantFromRequest, // header parsing helper
-  tenantUtils,          // misc helpers
+  getTenantFromRequest, // tenant resolution helper
+  tenantMiddleware,     // { setTenantContext, getTenantFromRequest }
 } = require('mtxpg');
+```
+
+Requiring the package for its side effect (`require('mtxpg')`) is what registers the `db.before('*')` search_path hook; the named exports are for callers that drive provisioning themselves.
+
+TypeScript declarations ship with the package (`index.d.ts`) — no `@types/mtxpg` needed. They are self-contained: the request, response and transaction parameters are structural types, so an Express `Request`/`Response` and a CAP `db.tx(req)` satisfy them without mtxpg depending on `@types/express` or CAP's own type package.
+
+```ts
+import { TenantManager, setTenantContext } from 'mtxpg';
+
+const schema: string = TenantManager.getSchemaName('acme'); // tenant_acme_822b33
 ```
 
 ### `TenantManager`
@@ -329,8 +359,7 @@ Returns the resolved tenant ID, or `null`. `req.user.tenant` outranks caller-sup
 | Setting | Where | Required | Notes |
 |---|---|---|---|
 | `cds.requires.db.kind: 'postgres'` | `package.json` | yes | Tells CAP to use `@cap-js/postgres` |
-| `cds.requires.db.credentials.*`    | `package.json` | yes | Standard pg connection params |
-| `cds.fiori.lean_draft: true`        | `package.json` | yes | Required by `@cap-js/postgres` |
+| `cds.requires.db.credentials.*`    | `package.json` / `CDS_*` env | yes | Standard pg connection params. Literal values or `CDS_REQUIRES_DB_CREDENTIALS_*` — **not** env-var names inline |
 | `using from 'mtxpg/src/db/schema'`  | `db/schema.cds` | yes | Brings `db.Tenants` into the deployable model |
 | `using from 'mtxpg/src/srv/tenant-service'` | a file under `srv/` | yes | Brings `TenantService` into the served model |
 | `require('mtxpg')` | `server.js` | yes | Registers the `db.before('*')` search_path hook |
@@ -360,11 +389,12 @@ Returns the resolved tenant ID, or `null`. `req.user.tenant` outranks caller-sup
 | `Generated foreign key element "X_ID" … conflicts with existing element` | DDL generated from runtime CSN (already has FKs materialised) | `TenantManager._tenantDDL()` loads a fresh CSN via `cds.load('*')` — make sure the cached DDL is invalidated on schema change |
 | Tables created in `public` only, none in tenant schema | `search_path` not set before DDL | Confirm `SET LOCAL search_path` runs first in `ensureTenantSchema`, and that the DDL runs inside a transaction |
 | `Tenant '<id>' is not provisioned` on a business request | Registry row exists but its schema does not | Re-run `createTenant` for that tenant (idempotent). This is the fail-closed path that used to silently read `public` |
-| `401` from every `/odata/v4/tenant` call | Caller lacks the `mtxpg-admin` role | Grant the role — see [Security model](#security-model) |
+| `401` from every `/odata/v4/tenant` call | Request is unauthenticated | Authenticate the caller; the service is not public |
+| `403` from every `/odata/v4/tenant` call | Caller is authenticated but lacks the `mtxpg-admin` role | Grant the role — see [Security model](#security-model) |
 | `tenantId is immutable` on `PATCH /Tenants(ID)` | Rename attempted | Delete and re-create the tenant; the schema name is derived from `tenantId` |
 | Views fail to deploy in tenant schemas | View bodies referenced public tables | Same fix — `search_path` must be set before `CREATE VIEW` |
 | `npm run deploy` does nothing | `scripts/deploy.js` `require()`'d `cds-deploy.js`, which short-circuits its CLI block via `if (!module.parent)` | Spawn `cds-deploy` as a child process (already in this repo's wrapper) |
-| `cds.fiori.lean_draft` error on startup | Missing config | Add `"fiori": { "lean_draft": true }` to `cds` config |
+| Connection refused to a host named `DB_HOST` | Env-var *names* used as `credentials` values; CAP does not expand them | Use literals or `CDS_REQUIRES_DB_CREDENTIALS_*` — see [Credentials from the environment](#credentials-from-the-environment) |
 
 ---
 
@@ -407,16 +437,29 @@ The server-backed suites spawn the parent CAP app as a child process (`npx cds-s
 From inside `mtxpg/`:
 
 ```bash
-npm install               # installs jest, pg, axios (devDeps)
+npm install               # installs jest, pg, axios, typescript (devDeps)
+npm run types:check       # tsc --noEmit over index.d.ts; no DB required
 npm run test:unit         # ~1s, no DB required
 npm run test:integration  # boots CAP, hits real Postgres
 npm run test:hardening    # regression suite for the audited defects
 npm run test:destructive   # isolated — kills the server on purpose
 npm test                  # unit + integration
-npm run test:all          # all four, in order
+npm run test:all          # types:check + all four suites, in order
 ```
 
+`types:check` compiles `index.d.ts` together with `test/types/usage.ts`, a compile-only fixture that exercises every export. It is the guard against declarations drifting from the implementation — types that are never compiled are documentation, not contracts.
+
 `--runInBand` is enforced because each project boots a single shared HTTP server; running test files in parallel would clobber it. Set `TEST_SERVER_LOG=1` to forward the spawned server's output — necessary when debugging a 500, since error responses are deliberately generic.
+
+Last full run — Node 22.21, `@sap/cds` 8.9.4, `@cap-js/postgres` 1.12, PostgreSQL on localhost:
+
+| Suite | Result |
+|---|---|
+| types:check | clean (`tsc` 5.9, `--strict`) |
+| unit | 28/28 pass |
+| integration | 12/12 pass |
+| hardening | 11/11 pass |
+| destructive | 1/1 pass |
 
 ### What's covered
 
@@ -463,6 +506,7 @@ DELETE FROM public.db_Tenants WHERE "tenantId" LIKE 'jest_%';
 ### CI / pre-publish gate
 
 Wire `npm run test:all` into your CI step. A green run validates:
+- the shipped TypeScript declarations still compile and still match the exports,
 - the public API surface still works,
 - the search_path hook is in place and fails closed,
 - DDL still emits cleanly for the host model,
@@ -502,6 +546,22 @@ Also worth knowing: `config` is no longer returned by `getTenantInfo` or `GET /T
 
 ---
 
-## TODO:
-[] Test the behavior of adapter in case of using `.env` file <br>
-[] Test project deployment on BTP while using `mtxpg`
+## Limitations
+
+Known and deliberate. Read these before choosing mtxpg over `@sap/cds-mtxs`.
+
+- **No schema migration for existing tenants.** `ensureTenantSchema` adds new tables and redefines views; it does not `ALTER` an existing table. Adding or changing a column on a deployed entity needs a migration of your own, replayed across every tenant schema.
+- **Not verified on SAP BTP.** Everything documented here was tested against PostgreSQL on localhost with a locally served CAP app. A BTP deployment (Cloud Foundry, service binding via `VCAP_SERVICES`, XSUAA-issued `mtxpg-admin`) is expected to work but has not been exercised end to end. Treat it as unvalidated.
+- **No `@sap/cds-mtxs` feature parity.** No extensibility (`cds.xt.ExtensibilityService`), no feature toggles, no model-variant support, no SaaS subscription callbacks (`/-/cds/saas-provisioning`). Tenant onboarding is your own call to `createTenant`, not a subscription event.
+- **`Tenants` is a reserved entity name.** The search_path hook routes any target matching `/(^|\.)Tenants$/` to `public`, so a business entity of your own called `Tenants` will be routed to the shared schema.
+- **DDL is cached for the process lifetime.** A rolling deploy can provision tenants from two model versions depending on which instance answers. Restart after model changes.
+- **The schema-existence cache is positive-only and never invalidated.** Dropping a tenant schema by hand under a running server leaves the cache stale; restart after manual surgery.
+- **One `SET LOCAL search_path` per statement**, not per transaction. A deep OData `$expand` roughly doubles its round-trip count.
+
+`ISSUES.md` in the repository is the audit record behind the 0.6 hardening work — it documents each defect, its reproduction, and the fix.
+
+---
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
