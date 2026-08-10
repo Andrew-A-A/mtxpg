@@ -1,6 +1,7 @@
-/* eslint-disable no-console */
 const crypto = require('crypto');
 const cds = require('@sap/cds');
+
+const LOG = cds.log('mtxpg');
 
 // Statements touching the tenant registry are never deployed into a tenant
 // schema — the registry lives in public only. Matches the table and any view
@@ -78,7 +79,7 @@ class TenantManager {
     // resolves inside the tenant schema, where db_tenants does not exist.
     await tx.run('SET LOCAL search_path TO public');
 
-    console.log(`[mtxpg] tenant schema ready: ${schema}`);
+    LOG.info('tenant schema ready:', schema);
     return schema;
   }
 
@@ -86,7 +87,7 @@ class TenantManager {
     const conn = tx || (await cds.connect.to('db'));
     const schema = TenantManager.getSchemaName(tenantId);
     await conn.run(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    console.log(`[mtxpg] tenant schema dropped: ${schema}`);
+    LOG.info('tenant schema dropped:', schema);
   }
 
   static async _tenantDDL() {

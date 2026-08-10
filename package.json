@@ -3,30 +3,47 @@
   "version": "0.6.0",
   "description": "Schema-per-tenant multitenancy for SAP CAP on PostgreSQL",
   "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "author": "Andrew Adel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Andrew-A-A/mtxpg.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Andrew-A-A/mtxpg/issues"
+  },
+  "homepage": "https://github.com/Andrew-A-A/mtxpg#readme",
+  "engines": {
+    "node": ">=18"
+  },
   "files": [
     "src/srv/**",
     "src/db/**",
     "src/middleware/**",
-    "src/utils/**",
     "src/adapter/**",
-    "index.js"
+    "index.js",
+    "index.d.ts"
   ],
   "scripts": {
+    "types:check": "tsc --noEmit -p tsconfig.json",
     "test": "jest --runInBand --selectProjects unit integration",
     "test:unit": "jest --runInBand --selectProjects unit",
     "test:integration": "jest --runInBand --selectProjects integration",
     "test:hardening": "jest --runInBand --selectProjects hardening",
     "test:destructive": "jest --runInBand --selectProjects destructive",
-    "test:all": "npm run test && npm run test:hardening && npm run test:destructive"
+    "test:all": "npm run types:check && npm run test && npm run test:hardening && npm run test:destructive"
   },
   "peerDependencies": {
     "@sap/cds": ">=8",
     "@cap-js/postgres": ">=1"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "axios": "^1.7.0",
     "jest": "^29.7.0",
-    "pg": "^8.11.0"
+    "pg": "^8.11.0",
+    "typescript": "^5.6.0"
   },
   "cds": {
     "folders": {

@@ -1,8 +1,10 @@
-/* eslint-disable no-console */
 const cds = require('@sap/cds');
 const TenantManager = require('./src/adapter/pg-adapter');
-const tenantUtils = require('./src/utils/tenant-utils');
 const tenantMiddleware = require('./src/middleware/tenant-middleware');
+
+// cds.log, not console: consumers route and silence mtxpg output through CAP's
+// own logging config like every other CAP component.
+const LOG = cds.log('mtxpg');
 
 // The tenant registry lives in public, never in a tenant schema — this matches
 // db.Tenants and any projection on it (e.g. TenantService.Tenants).
@@ -63,12 +65,11 @@ cds.on('connect', (db) => {
     await req.tx.run(`SET LOCAL search_path TO "${schema}"`);
   });
 
-  console.log('[mtxpg] schema-per-tenant routing enabled');
+  LOG.info('schema-per-tenant routing enabled');
 });
 
 module.exports = {
   TenantManager,
-  tenantUtils,
   tenantMiddleware,
   setTenantContext: tenantMiddleware.setTenantContext,
   getTenantFromRequest: tenantMiddleware.getTenantFromRequest,

@@ -1,0 +1,13 @@
+{
+  "// note": "Type-check only — mtxpg itself is plain JavaScript. Verifies index.d.ts is valid and actually usable. Not published (see the files allowlist in package.json).",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "node16",
+    "moduleResolution": "node16",
+    "types": ["node"],
+    "skipLibCheck": false
+  },
+  "include": ["index.d.ts", "test/types/**/*.ts"]
+}
